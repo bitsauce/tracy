@@ -33,6 +33,11 @@
 #  include <sys/neutrino.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+#  include <thread>
+#  include <functional>
+#endif
+
 #ifdef __MINGW32__
 #  define __STDC_FORMAT_MACROS
 #endif
@@ -84,8 +89,7 @@ TRACY_API uint32_t GetThreadHandleImpl()
 #elif defined __QNX__
     return (uint32_t) gettid();
 #elif defined __EMSCRIPTEN__
-    // Not supported, but let it compile.
-    return 0;
+    return std::hash<std::thread::id>{}(std::this_thread::get_id());
 #else
     // To add support for a platform, retrieve and return the kernel thread identifier here.
     //

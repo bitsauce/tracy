@@ -223,6 +223,14 @@ static void LoadConfig()
     int v;
     if( ini_sget( ini, "core", "threadedRendering", "%d", &v ) ) s_config.threadedRendering = v;
     if( ini_sget( ini, "core", "focusLostLimit", "%d", &v ) ) s_config.focusLostLimit = v;
+    if( ini_sget( ini, "core", "connectionMode", "%d", &v ) && ( v == 0 || v == 1 ) ) s_config.connectionMode = v;
+    if( ini_sget( ini, "core", "hostPort", "%d", &v ) && v > 0 && v < 65536 ) s_config.hostPort = v;
+    if( ini_sget( ini, "core", "hostTls", "%d", &v ) ) s_config.hostTls = v;
+#ifndef ENABLE_SECURE_WEBSOCKETS
+    // Drop a stale "on" from a TLS-capable build so the disabled UI matches what
+    // would actually happen if the user clicked Host.
+    s_config.hostTls = false;
+#endif
     if( ini_sget( ini, "timeline", "targetFps", "%d", &v ) && v >= 1 && v < 10000 ) s_config.targetFps = v;
     if( ini_sget( ini, "timeline", "dynamicColors", "%d", &v ) ) s_config.dynamicColors = v;
     if( ini_sget( ini, "timeline", "forceColors", "%d", &v ) ) s_config.forceColors = v;
@@ -244,6 +252,9 @@ static bool SaveConfig()
     fprintf( f, "[core]\n" );
     fprintf( f, "threadedRendering = %i\n", (int)s_config.threadedRendering );
     fprintf( f, "focusLostLimit = %i\n", (int)s_config.focusLostLimit );
+    fprintf( f, "connectionMode = %i\n", s_config.connectionMode );
+    fprintf( f, "hostPort = %i\n", s_config.hostPort );
+    fprintf( f, "hostTls = %i\n", (int)s_config.hostTls );
 
     fprintf( f, "\n[timeline]\n" );
     fprintf( f, "targetFps = %i\n", s_config.targetFps );
@@ -917,52 +928,88 @@ static void DrawContents()
             ImGui::PopFont();
         }
         ImGui::Separator();
-        ImGui::TextUnformatted( "Client address" );
+        ImGui::RadioButton( "Connect to app", &s_config.connectionMode, 0 );
+        ImGui::SameLine();
+        ImGui::RadioButton( "Host WebSocket", &s_config.connectionMode, 1 );
         bool connectClicked = false;
-        connectClicked |= ImGui::InputTextWithHint( "###connectaddress", "Enter address", addr, 1024, ImGuiInputTextFlags_EnterReturnsTrue );
-        if( !connHist->empty() )
+        if( s_config.connectionMode == 0 )
         {
-            ImGui::SameLine();
-            if( ImGui::BeginCombo( "##frameCombo", nullptr, ImGuiComboFlags_NoPreview ) )
+            ImGui::TextUnformatted( "Client address" );
+            connectClicked |= ImGui::InputTextWithHint( "###connectaddress", "Enter address", addr, 1024, ImGuiInputTextFlags_EnterReturnsTrue );
+            if( !connHist->empty() )
             {
-                int idxRemove = -1;
-                const auto sz = std::min<size_t>( 5, connHist->size() );
-                for( size_t i=0; i<sz; i++ )
+                ImGui::SameLine();
+                if( ImGui::BeginCombo( "##frameCombo", nullptr, ImGuiComboFlags_NoPreview ) )
                 {
-                    const auto& str = connHist->Name( i );
-                    if( ImGui::Selectable( str.c_str() ) )
+                    int idxRemove = -1;
+                    const auto sz = std::min<size_t>( 5, connHist->size() );
+                    for( size_t i=0; i<sz; i++ )
                     {
-                        memcpy( addr, str.c_str(), str.size() + 1 );
+                        const auto& str = connHist->Name( i );
+                        if( ImGui::Selectable( str.c_str() ) )
+                        {
+                            memcpy( addr, str.c_str(), str.size() + 1 );
+                        }
+                        if( ImGui::IsItemHovered() && ImGui::IsKeyPressed( ImGui::GetKeyIndex( ImGuiKey_Delete ), false ) )
+                        {
+                            idxRemove = (int)i;
+                        }
                     }
-                    if( ImGui::IsItemHovered() && ImGui::IsKeyPressed( ImGui::GetKeyIndex( ImGuiKey_Delete ), false ) )
+                    if( idxRemove >= 0 )
                     {
-                        idxRemove = (int)i;
+                        connHist->Erase( idxRemove );
                     }
+                    ImGui::EndCombo();
                 }
-                if( idxRemove >= 0 )
+            }
+            connectClicked |= ImGui::Button( ICON_FA_WIFI " Connect" );
+            if( connectClicked && *addr && !loadThread.joinable() )
+            {
+                connHist->Count( addr );
+
+                const auto addrLen = strlen( addr );
+                auto ptr = addr + addrLen - 1;
+                while( ptr > addr && *ptr != ':' ) ptr--;
+                if( *ptr == ':' )
                 {
-                    connHist->Erase( idxRemove );
+                    std::string addrPart = std::string( addr, ptr );
+                    uint16_t portPart = (uint16_t)atoi( ptr+1 );
+                    view = std::make_unique<tracy::View>( RunOnMainThread, addrPart.c_str(), portPart, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements );
                 }
-                ImGui::EndCombo();
+                else
+                {
+                    view = std::make_unique<tracy::View>( RunOnMainThread, addr, port, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements );
+                }
             }
         }
-        connectClicked |= ImGui::Button( ICON_FA_WIFI " Connect" );
-        if( connectClicked && *addr && !loadThread.joinable() )
+        else
         {
-            connHist->Count( addr );
-
-            const auto addrLen = strlen( addr );
-            auto ptr = addr + addrLen - 1;
-            while( ptr > addr && *ptr != ':' ) ptr--;
-            if( *ptr == ':' )
+            // Host mode: the profiler listens for an incoming WebSocket from a
+            // (typically browser-based) instrumented app. Address is unused; we
+            // pass empty string and let the Worker know via the `host` flag.
+            ImGui::TextUnformatted( "Listen port" );
+            ImGui::SetNextItemWidth( 120 * dpiScale );
+            ImGui::InputScalar( "###hostport", ImGuiDataType_S32, &s_config.hostPort );
+            if( s_config.hostPort < 1 ) s_config.hostPort = 1;
+            if( s_config.hostPort > 65535 ) s_config.hostPort = 65535;
+#ifndef ENABLE_SECURE_WEBSOCKETS
+            // Built without TLS support — show the option but disabled, so the user
+            // can see the feature exists. LoadConfig already forces hostTls off in
+            // this build configuration, so the disabled box reflects reality.
+            ImGui::BeginDisabled();
+#endif
+            ImGui::Checkbox( "Use TLS (wss://)", &s_config.hostTls );
+#ifndef ENABLE_SECURE_WEBSOCKETS
+            if( ImGui::IsItemHovered() )
             {
-                std::string addrPart = std::string( addr, ptr );
-                uint16_t portPart = (uint16_t)atoi( ptr+1 );
-                view = std::make_unique<tracy::View>( RunOnMainThread, addrPart.c_str(), portPart, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements );
+                ImGui::SetTooltip( "TLS support not compiled in (OpenSSL was not found at build time)" );
             }
-            else
+            ImGui::EndDisabled();
+#endif
+            connectClicked |= ImGui::Button( ICON_FA_WIFI " Host" );
+            if( connectClicked && !loadThread.joinable() )
             {
-                view = std::make_unique<tracy::View>( RunOnMainThread, addr, port, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements );
+                view = std::make_unique<tracy::View>( RunOnMainThread, "", (uint16_t)s_config.hostPort, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements, true, s_config.hostTls );
             }
         }
         if( s_config.memoryLimit )

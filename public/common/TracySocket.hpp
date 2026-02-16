@@ -15,21 +15,25 @@ namespace tracy
 void InitWinSock();
 #endif
 
+#ifdef __EMSCRIPTEN__
+struct EmWsImpl;
+#endif
+
 class Socket
 {
 public:
     Socket();
     Socket( int sock );
-    ~Socket();
+    virtual ~Socket();
 
-    bool Connect( const char* addr, uint16_t port );
-    bool ConnectBlocking( const char* addr, uint16_t port );
-    void Close();
+    bool Connect( const char* addr, uint16_t port, bool tls = false );
+    bool ConnectBlocking( const char* addr, uint16_t port, bool tls = false );
+    virtual void Close();
 
-    int Send( const void* buf, int len );
-    int GetSendBufSize();
+    virtual int Send( const void* buf, int len );
+    virtual int GetSendBufSize();
 
-    int ReadUpTo( void* buf, int len );
+    virtual int ReadUpTo( void* buf, int len );
     bool Read( void* buf, int len, int timeout );
 
     template<typename ShouldExit>
@@ -38,15 +42,15 @@ public:
         auto cbuf = (char*)buf;
         while( len > 0 )
         {
-            if( exitCb() ) return false;
+            if( exitCb() ) { m_alive = false; return false; }
             if( !ReadImpl( cbuf, len, timeout ) ) return false;
         }
         return true;
     }
 
     bool ReadRaw( void* buf, int len, int timeout );
-    bool HasData();
-    bool IsValid() const;
+    virtual bool HasData();
+    virtual bool IsValid() const;
 
     Socket( const Socket& ) = delete;
     Socket( Socket&& ) = delete;
@@ -55,7 +59,7 @@ public:
 
 private:
     int RecvBuffered( void* buf, int len, int timeout );
-    int Recv( void* buf, int len, int timeout );
+    virtual int Recv( void* buf, int len, int timeout );
 
     bool ReadImpl( char*& buf, int& len, int timeout );
 
@@ -67,6 +71,13 @@ private:
     struct addrinfo *m_res;
     struct addrinfo *m_ptr;
     int m_connSock;
+
+#ifdef __EMSCRIPTEN__
+    EmWsImpl* m_emWs;
+#endif
+
+protected:
+    std::atomic<bool> m_alive;
 };
 
 class ListenSocket
@@ -77,6 +88,10 @@ public:
 
     bool Listen( uint16_t port, int backlog );
     Socket* Accept();
+#ifdef ENABLE_WEBSOCKETS
+    bool ListenWebSocket( uint16_t port, bool tls );
+    Socket* AcceptWebSocket();
+#endif
     void Close();
 
     ListenSocket( const ListenSocket& ) = delete;
@@ -86,6 +101,9 @@ public:
 
 private:
     int m_sock;
+#ifdef ENABLE_WEBSOCKETS
+    Socket* m_webSocket;
+#endif
 };
 
 class UdpBroadcast

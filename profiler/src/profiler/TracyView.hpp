@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
 
 #include "imgui.h"
 
@@ -104,7 +105,7 @@ public:
     using SetScaleCallback = void(*)( float );
     using AttentionCallback = void(*)();
 
-    View( void(*cbMainThread)(const std::function<void()>&, bool), const char* addr, uint16_t port, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr );
+    View( void(*cbMainThread)(const std::function<void()>&, bool), const char* addr, uint16_t port, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr, bool host = false, bool tls = false );
     View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr );
     ~View();
 

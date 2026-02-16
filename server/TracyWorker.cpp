@@ -260,9 +260,11 @@ static bool IsQueryPrio( ServerQuery type )
 
 LoadProgress Worker::s_loadProgress;
 
-Worker::Worker( const char* addr, uint16_t port, int64_t memoryLimit )
+Worker::Worker( const char* addr, uint16_t port, int64_t memoryLimit, bool host, bool tls )
     : m_addr( addr )
     , m_port( port )
+    , m_host( host )
+    , m_tls( tls )
     , m_hasData( false )
     , m_stream( LZ4_createStreamDecode() )
     , m_buffer( new char[TargetFrameSize*3 + 1] )
@@ -2632,8 +2634,8 @@ void Worker::Network()
 
         auto buf = m_buffer + m_bufferOffset;
         lz4sz_t lz4sz;
-        if( !m_sock.Read( &lz4sz, sizeof( lz4sz ), 10, ShouldExit ) ) goto close;
-        if( !m_sock.Read( lz4buf.get(), lz4sz, 10, ShouldExit ) ) goto close;
+        if( !m_sock->Read( &lz4sz, sizeof( lz4sz ), 10, ShouldExit ) ) goto close;
+        if( !m_sock->Read( lz4buf.get(), lz4sz, 10, ShouldExit ) ) goto close;
         auto bb = m_bytes.load( std::memory_order_relaxed );
         m_bytes.store( bb + sizeof( lz4sz ) + lz4sz, std::memory_order_relaxed );
 
@@ -2662,20 +2664,54 @@ void Worker::Exec()
 {
     auto ShouldExit = [this] { return m_shutdown.load( std::memory_order_relaxed ); };
 
-    for(;;)
+    // Mode is chosen up-front in the connection dialog: Connect (outbound TCP)
+    // or Host (inbound WebSocket on m_port with optional TLS). They never run
+    // in parallel, so the WS listener uses m_port directly — no offset hack.
+    //
+    // ListenSocket lives at function scope so the WebSocket it owns outlives
+    // the connect phase — m_sock points into it, so destroying `listen` here
+    // would dangle m_sock for the whole capture session.
+#ifdef ENABLE_WEBSOCKETS
+    ListenSocket listen;
+#endif
+    if( m_host )
     {
-        if( m_shutdown.load( std::memory_order_relaxed ) ) { m_netWriteCv.notify_one(); return; };
-        if( m_sock.Connect( m_addr.c_str(), m_port ) ) break;
-        std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+#ifdef ENABLE_WEBSOCKETS
+        listen.ListenWebSocket( m_port, m_tls );
+        for(;;)
+        {
+            if( m_shutdown.load( std::memory_order_relaxed ) ) { m_netWriteCv.notify_one(); return; }
+            m_sock = listen.AcceptWebSocket();
+            if( m_sock ) break;
+            std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+        }
+#else
+        printf( "WebSockets not compiled in; cannot host.\n" );
+        m_netWriteCv.notify_one();
+        return;
+#endif
+    }
+    else
+    {
+        for(;;)
+        {
+            if( m_shutdown.load( std::memory_order_relaxed ) ) { m_netWriteCv.notify_one(); return; }
+            if( m_sockAsClient.Connect( m_addr.c_str(), m_port ) )
+            {
+                m_sock = &m_sockAsClient;
+                break;
+            }
+            std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+        }
     }
 
     std::chrono::time_point<std::chrono::high_resolution_clock> t0;
 
-    m_sock.Send( HandshakeShibboleth, HandshakeShibbolethSize );
+    m_sock->Send( HandshakeShibboleth, HandshakeShibbolethSize );
     uint32_t protocolVersion = ProtocolVersion;
-    m_sock.Send( &protocolVersion, sizeof( protocolVersion ) );
+    m_sock->Send( &protocolVersion, sizeof( protocolVersion ) );
     HandshakeStatus handshake;
-    if( !m_sock.Read( &handshake, sizeof( handshake ), 10, ShouldExit ) )
+    if( !m_sock->Read( &handshake, sizeof( handshake ), 10, ShouldExit ) )
     {
         m_handshake.store( HandshakeDropped, std::memory_order_relaxed );
         goto close;
@@ -2704,7 +2740,7 @@ void Worker::Exec()
 
     {
         WelcomeMessage welcome;
-        if( !m_sock.Read( &welcome, sizeof( welcome ), 10, ShouldExit ) )
+        if( !m_sock->Read( &welcome, sizeof( welcome ), 10, ShouldExit ) )
         {
             m_handshake.store( HandshakeDropped, std::memory_order_relaxed );
             goto close;
@@ -2746,7 +2782,7 @@ void Worker::Exec()
         if( m_onDemand )
         {
             OnDemandPayloadMessage onDemand;
-            if( !m_sock.Read( &onDemand, sizeof( onDemand ), 10, ShouldExit ) )
+            if( !m_sock->Read( &onDemand, sizeof( onDemand ), 10, ShouldExit ) )
             {
                 m_handshake.store( HandshakeDropped, std::memory_order_relaxed );
                 goto close;
@@ -2756,7 +2792,7 @@ void Worker::Exec()
         }
     }
 
-    m_serverQuerySpaceBase = m_serverQuerySpaceLeft = std::min( ( m_sock.GetSendBufSize() / ServerQueryPacketSize ), 8*1024 ) - 4;   // leave space for terminate request
+    m_serverQuerySpaceBase = m_serverQuerySpaceLeft = std::min( ( m_sock->GetSendBufSize() / ServerQueryPacketSize ), 8*1024 ) - 4;   // leave space for terminate request
     m_hasData.store( true, std::memory_order_release );
 
     LZ4_setStreamDecode( (LZ4_streamDecode_t*)m_stream, nullptr, 0 );
@@ -2811,7 +2847,7 @@ void Worker::Exec()
             if( m_serverQuerySpaceLeft > 0 && !m_serverQueryQueuePrio.empty() )
             {
                 const auto toSend = std::min( m_serverQuerySpaceLeft, m_serverQueryQueuePrio.size() );
-                m_sock.Send( m_serverQueryQueuePrio.data(), toSend * ServerQueryPacketSize );
+                m_sock->Send( m_serverQueryQueuePrio.data(), toSend * ServerQueryPacketSize );
                 m_serverQuerySpaceLeft -= toSend;
                 if( toSend == m_serverQueryQueuePrio.size() )
                 {
@@ -2825,7 +2861,7 @@ void Worker::Exec()
             if( m_serverQuerySpaceLeft > 0 && !m_serverQueryQueue.empty() )
             {
                 const auto toSend = std::min( m_serverQuerySpaceLeft, m_serverQueryQueue.size() );
-                m_sock.Send( m_serverQueryQueue.data(), toSend * ServerQueryPacketSize );
+                m_sock->Send( m_serverQueryQueue.data(), toSend * ServerQueryPacketSize );
                 m_serverQuerySpaceLeft -= toSend;
                 if( toSend == m_serverQueryQueue.size() )
                 {
@@ -2880,7 +2916,7 @@ void Worker::Exec()
 close:
     Shutdown();
     m_netWriteCv.notify_one();
-    m_sock.Close();
+    m_sock->Close();
     m_connected.store( false, std::memory_order_relaxed );
 }
 
@@ -2953,7 +2989,7 @@ void Worker::HandleFailure( const char* ptr, const char* end )
         if( m_serverQuerySpaceLeft > 0 && !m_serverQueryQueuePrio.empty() )
         {
             const auto toSend = std::min( m_serverQuerySpaceLeft, m_serverQueryQueuePrio.size() );
-            m_sock.Send( m_serverQueryQueuePrio.data(), toSend * ServerQueryPacketSize );
+            m_sock->Send( m_serverQueryQueuePrio.data(), toSend * ServerQueryPacketSize );
             m_serverQuerySpaceLeft -= toSend;
             if( toSend == m_serverQueryQueuePrio.size() )
             {
@@ -2967,7 +3003,7 @@ void Worker::HandleFailure( const char* ptr, const char* end )
         if( m_serverQuerySpaceLeft > 0 && !m_serverQueryQueue.empty() )
         {
             const auto toSend = std::min( m_serverQuerySpaceLeft, m_serverQueryQueue.size() );
-            m_sock.Send( m_serverQueryQueue.data(), toSend * ServerQueryPacketSize );
+            m_sock->Send( m_serverQueryQueue.data(), toSend * ServerQueryPacketSize );
             m_serverQuerySpaceLeft -= toSend;
             if( toSend == m_serverQueryQueue.size() )
             {
@@ -3095,7 +3131,7 @@ void Worker::Query( ServerQuery type, uint64_t data, uint32_t extra )
     if( m_serverQuerySpaceLeft > 0 && m_serverQueryQueuePrio.empty() && m_serverQueryQueue.empty() )
     {
         m_serverQuerySpaceLeft--;
-        m_sock.Send( &query, ServerQueryPacketSize );
+        m_sock->Send( &query, ServerQueryPacketSize );
     }
     else if( IsQueryPrio( type ) )
     {
@@ -3110,7 +3146,7 @@ void Worker::Query( ServerQuery type, uint64_t data, uint32_t extra )
 void Worker::QueryTerminate()
 {
     ServerQueryPacket query { ServerQueryTerminate, 0, 0 };
-    m_sock.Send( &query, ServerQueryPacketSize );
+    m_sock->Send( &query, ServerQueryPacketSize );
 }
 
 void Worker::QuerySourceFile( const char* fn, const char* image )
@@ -3581,7 +3617,7 @@ void Worker::CheckThreadString( uint64_t id )
     m_data.threadNames.emplace( id, "???" );
     m_pendingThreads++;
 
-    if( m_sock.IsValid() ) Query( ServerQueryThreadString, id );
+    if( m_sock->IsValid() ) Query( ServerQueryThreadString, id );
 }
 
 void Worker::CheckFiberName( uint64_t id, uint64_t tid )
@@ -3591,7 +3627,7 @@ void Worker::CheckFiberName( uint64_t id, uint64_t tid )
     m_data.threadNames.emplace( tid, "???" );
     m_pendingFibers++;
 
-    if( m_sock.IsValid() ) Query( ServerQueryFiberName, id );
+    if( m_sock->IsValid() ) Query( ServerQueryFiberName, id );
 }
 
 void Worker::CheckExternalName( uint64_t id )

@@ -933,6 +933,12 @@ private:
     UdpBroadcast* m_broadcast;
     bool m_noExit;
     uint32_t m_userPort;
+#ifdef TRACY_NO_LISTEN
+    const char* m_connectTo;
+#endif
+#ifdef __EMSCRIPTEN__
+    bool m_useTls;
+#endif
     std::atomic<uint32_t> m_zoneId;
     int64_t m_samplingPeriod;
 

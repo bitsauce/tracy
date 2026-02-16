@@ -74,6 +74,7 @@ set_option(TRACY_NO_CALLSTACK_INLINES "Disables the inline functions in callstac
 set_option(TRACY_ONLY_LOCALHOST "Only listen on the localhost interface" OFF)
 set_option(TRACY_NO_BROADCAST "Disable client discovery by broadcast to local network" OFF)
 set_option(TRACY_ONLY_IPV4 "Tracy will only accept connections on IPv4 addresses (disable IPv6)" OFF)
+set_option(TRACY_NO_LISTEN "Client will connect to the profiler as a client instead of a host" OFF)
 set_option(TRACY_NO_CODE_TRANSFER "Disable collection of source code" OFF)
 set_option(TRACY_NO_CONTEXT_SWITCH "Disable capture of context switches" OFF)
 set_option(TRACY_NO_EXIT "Client executable does not exit until all profile data is sent to server" OFF)

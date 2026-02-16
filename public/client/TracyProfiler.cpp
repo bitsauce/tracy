@@ -53,6 +53,10 @@
 #  include <sys/stat.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 #include <algorithm>
 #include <assert.h>
 #include <atomic>
@@ -429,6 +433,10 @@ static const char* GetProcessName()
     if( buf ) processName = buf;
 #elif defined __QNX__
     processName = __progname;
+#elif defined __EMSCRIPTEN__
+    // No good way to identify process name, use this env vars if something other than the default value is desired
+    const char* procnameUser = GetEnvVar( "TRACY_PROCNAME" );
+    if( procnameUser ) processName = procnameUser;
 #endif
     return processName;
 }
@@ -550,6 +558,10 @@ static const char* GetHostInfo()
     ptr += sprintf( ptr, "OS: BSD (OpenBSD)\n" );
 #elif defined __QNX__
     ptr += sprintf( ptr, "OS: QNX\n" );
+#elif defined __EMSCRIPTEN__
+    const auto platform = (char*)EM_ASM_PTR({ return stringToNewUTF8(navigator.platform || ""); });
+    ptr += sprintf( ptr, "OS: %s\n", platform );
+    free(platform);
 #else
     ptr += sprintf( ptr, "OS: unknown\n" );
 #endif
@@ -560,6 +572,8 @@ static const char* GetHostInfo()
 #  else
     ptr += sprintf( ptr, "Compiler: MSVC %i\n", _MSC_VER );
 #  endif
+#elif defined __EMSCRIPTEN__
+    ptr += sprintf( ptr, "Compiler: clang %i.%i.%i (emscripten %i.%i.%i)\n", __clang_major__, __clang_minor__, __clang_patchlevel__, __EMSCRIPTEN_major__, __EMSCRIPTEN_minor__, __EMSCRIPTEN_tiny__ );
 #elif defined __clang__
     ptr += sprintf( ptr, "Compiler: clang %i.%i.%i\n", __clang_major__, __clang_minor__, __clang_patchlevel__ );
 #elif defined __GNUC__
@@ -602,9 +616,32 @@ static const char* GetHostInfo()
     getlogin_r( user, _POSIX_LOGIN_NAME_MAX );
 #  endif
 
+#ifdef __EMSCRIPTEN__
+    // No good way to identify the user on web, use these env vars if something other than the default value is desired
+    const char* envUser = GetEnvVar( "TRACY_USER" );
+    const char* envHostname = GetEnvVar( "TRACY_HOSTNAME" );
+    if( envUser )
+    {
+        const auto len = strlen(envUser)+1 >= _POSIX_LOGIN_NAME_MAX ? _POSIX_LOGIN_NAME_MAX : strlen(envUser)+1;
+        memcpy( user, envUser, len-1 );
+        user[len-1] = '\0';
+    }
+    if( envHostname )
+    {
+        const auto len = strlen(envHostname)+1 >= _POSIX_HOST_NAME_MAX ? _POSIX_HOST_NAME_MAX : strlen(envHostname)+1;
+        memcpy( hostname, envHostname, len-1 );
+        hostname[len-1] = '\0';
+    }
+#endif
+
     ptr += sprintf( ptr, "User: %s@%s\n", user, hostname );
 #endif
 
+#ifdef __EMSCRIPTEN__
+    const auto userAgent = (char*)EM_ASM_PTR({ return stringToNewUTF8(navigator.userAgent || ""); });
+    ptr += sprintf( ptr, "User Agent: %s\n", userAgent );
+    free(userAgent);
+#else
 #if defined __i386 || defined _M_IX86
     ptr += sprintf( ptr, "Arch: x86\n" );
 #elif defined __x86_64__ || defined _M_X64
@@ -689,6 +726,7 @@ static const char* GetHostInfo()
 #else
     ptr += sprintf( ptr, "CPU: unknown\n" );
 #endif
+#endif
 #ifdef __ANDROID__
     char deviceModel[PROP_VALUE_MAX+1];
     char deviceManufacturer[PROP_VALUE_MAX+1];
@@ -737,6 +775,9 @@ static const char* GetHostInfo()
     }
     memSize = memSize / 1024 / 1024;
     ptr += sprintf( ptr, "RAM: %llu MB\n", memSize);
+#elif defined __EMSCRIPTEN__
+    const int memGB = EM_ASM_INT({ return navigator.deviceMemory ? (navigator.deviceMemory|0) : 0; });
+    ptr += sprintf( ptr, "RAM: %d GB\n", memGB);
 #else
     ptr += sprintf( ptr, "RAM: unknown\n" );
 #endif
@@ -1389,6 +1430,12 @@ Profiler::Profiler()
     , m_broadcast( nullptr )
     , m_noExit( false )
     , m_userPort( 0 )
+#ifdef TRACY_NO_LISTEN
+    , m_connectTo( "127.0.0.1" )
+#endif
+#ifdef __EMSCRIPTEN__
+    , m_useTls(false)
+#endif
     , m_zoneId( 1 )
     , m_samplingPeriod( 0 )
     , m_stream( LZ4_createStream() )
@@ -1450,6 +1497,23 @@ Profiler::Profiler()
     {
         m_userPort = atoi( userPort );
     }
+
+#ifdef TRACY_NO_LISTEN
+    // Note: can be configured in "preRun" for emscripten
+    const char* connectTo = GetEnvVar( "TRACY_CONNECT_TO" );
+    if( connectTo )
+    {
+        m_connectTo = connectTo;
+    }
+#endif
+
+#ifdef __EMSCRIPTEN__
+    const char* useTls = GetEnvVar( "TRACY_USE_TLS" );
+    if( useTls )
+    {
+        m_useTls = useTls[0] == '1';
+    }
+#endif
 
 #if !defined(TRACY_DELAYED_INIT) || !defined(TRACY_MANUAL_LIFETIME)
     SpawnWorkerThreads();
@@ -1728,6 +1792,7 @@ void Profiler::Worker()
 
     moodycamel::ConsumerToken token( GetQueue() );
 
+#ifndef TRACY_NO_LISTEN
     ListenSocket listen;
     bool isListening = false;
     if( !dataPortSearch )
@@ -1760,6 +1825,7 @@ void Profiler::Worker()
             std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
         }
     }
+#endif
 
 #ifndef TRACY_NO_BROADCAST
     m_broadcast = (UdpBroadcast*)tracy_malloc( sizeof( UdpBroadcast ) );
@@ -1787,6 +1853,11 @@ void Profiler::Worker()
     auto& broadcastMsg = GetBroadcastMessage( procname, pnsz, broadcastLen, dataPort );
     uint64_t lastBroadcast = 0;
 
+#ifdef TRACY_NO_LISTEN
+    Socket socket;
+    m_sock = &socket;
+#endif
+
     // Connections loop.
     // Each iteration of the loop handles whole connection. Multiple iterations will only
     // happen in the on-demand mode or when handshake fails.
@@ -1807,8 +1878,12 @@ void Profiler::Worker()
                 return;
             }
 #endif
+#ifndef TRACY_NO_LISTEN
             m_sock = listen.Accept();
             if( m_sock ) break;
+#else
+            if ( m_sock->Connect( m_connectTo, dataPort, m_useTls ) ) break;
+#endif
 #ifndef TRACY_ON_DEMAND
             ProcessSysTime();
 #  ifdef TRACY_HAS_SYSPOWER
@@ -1846,36 +1921,37 @@ void Profiler::Worker()
         }
 
         // Handshake
+        bool handshakeSuccess = true;
         {
             char shibboleth[HandshakeShibbolethSize];
             auto res = m_sock->ReadRaw( shibboleth, HandshakeShibbolethSize, 2000 );
-            if( !res || memcmp( shibboleth, HandshakeShibboleth, HandshakeShibbolethSize ) != 0 )
-            {
-                m_sock->~Socket();
-                tracy_free( m_sock );
-                m_sock = nullptr;
-                continue;
-            }
-
+            handshakeSuccess = res && memcmp( shibboleth, HandshakeShibboleth, HandshakeShibbolethSize ) == 0;
+        }
+        
+        if ( handshakeSuccess )
+        {
             uint32_t protocolVersion;
-            res = m_sock->ReadRaw( &protocolVersion, sizeof( protocolVersion ), 2000 );
-            if( !res )
-            {
-                m_sock->~Socket();
-                tracy_free( m_sock );
-                m_sock = nullptr;
-                continue;
-            }
-
+            auto res = m_sock->ReadRaw( &protocolVersion, sizeof( protocolVersion ), 2000 );
+            handshakeSuccess = res;
             if( protocolVersion != ProtocolVersion )
             {
                 HandshakeStatus status = HandshakeProtocolMismatch;
                 m_sock->Send( &status, sizeof( status ) );
-                m_sock->~Socket();
-                tracy_free( m_sock );
-                m_sock = nullptr;
-                continue;
+                handshakeSuccess = false;
             }
+        }
+
+        if( !handshakeSuccess )
+        {
+#ifndef TRACY_NO_LISTEN
+            m_sock->~Socket();
+            tracy_free( m_sock );
+            m_sock = nullptr;
+#else
+            // Socket is allocated on stack in "connect mode", don't free it
+            m_sock->Close();
+#endif
+            continue;
         }
 
 #ifdef TRACY_ON_DEMAND
@@ -1994,9 +2070,13 @@ void Profiler::Worker()
         m_bufferStart = 0;
 #endif
 
+#ifndef TRACY_NO_LISTEN
         m_sock->~Socket();
         tracy_free( m_sock );
         m_sock = nullptr;
+#else
+        m_sock->Close();
+#endif
 
 #ifndef TRACY_ON_DEMAND
         // Client is no longer available here. Accept incoming connections, but reject handshake.
@@ -2010,33 +2090,37 @@ void Profiler::Worker()
 
             ClearQueues( token );
 
+#ifndef TRACY_NO_LISTEN
             m_sock = listen.Accept();
+#else
+            if ( m_sock->Connect( m_connectTo, dataPort, m_useTls ) ) break;
+#endif
             if( m_sock )
             {
-                char shibboleth[HandshakeShibbolethSize];
-                auto res = m_sock->ReadRaw( shibboleth, HandshakeShibbolethSize, 1000 );
-                if( !res || memcmp( shibboleth, HandshakeShibboleth, HandshakeShibbolethSize ) != 0 )
+                // Handshake
+                bool handshakeSuccess = true;
                 {
-                    m_sock->~Socket();
-                    tracy_free( m_sock );
-                    m_sock = nullptr;
-                    continue;
+                    char shibboleth[HandshakeShibbolethSize];
+                    auto res = m_sock->ReadRaw( shibboleth, HandshakeShibbolethSize, 2000 );
+                    handshakeSuccess = res && memcmp( shibboleth, HandshakeShibboleth, HandshakeShibbolethSize ) == 0;
                 }
 
-                uint32_t protocolVersion;
-                res = m_sock->ReadRaw( &protocolVersion, sizeof( protocolVersion ), 1000 );
-                if( !res )
+                if (handshakeSuccess)
                 {
-                    m_sock->~Socket();
-                    tracy_free( m_sock );
-                    m_sock = nullptr;
-                    continue;
+                    uint32_t protocolVersion;
+                    auto res = m_sock->ReadRaw( &protocolVersion, sizeof( protocolVersion ), 2000 );
+                    HandshakeStatus status = HandshakeNotAvailable;
+                    m_sock->Send( &status, sizeof( status ) );
                 }
 
-                HandshakeStatus status = HandshakeNotAvailable;
-                m_sock->Send( &status, sizeof( status ) );
+        #ifndef TRACY_NO_LISTEN
                 m_sock->~Socket();
                 tracy_free( m_sock );
+                m_sock = nullptr;
+        #else
+                // Socket is allocated on stack in "connect mode", don't free it
+                m_sock->Close();
+        #endif
             }
         }
 #endif

@@ -452,7 +452,7 @@ public:
         NUM_FAILURES
     };
 
-    Worker( const char* addr, uint16_t port, int64_t memoryLimit );
+    Worker( const char* addr, uint16_t port, int64_t memoryLimit, bool host = false, bool tls = false );
     Worker( const char* name, const char* program, const std::vector<ImportEventTimeline>& timeline, const std::vector<ImportEventMessages>& messages, const std::vector<ImportEventPlots>& plots, const std::unordered_map<uint64_t, std::string>& threadNames );
     Worker( FileRead& f, EventType::Type eventMask = EventType::All, bool bgTasks = true, bool allowStringModification = false);
     ~Worker();
@@ -966,9 +966,12 @@ private:
     int64_t TscTime( uint64_t tsc ) { return int64_t( ( tsc - m_data.baseTime ) * m_timerMul ); }
     int64_t TscPeriod( uint64_t tsc ) { return int64_t( tsc * m_timerMul ); }
 
-    Socket m_sock;
+    Socket m_sockAsClient;
+    Socket* m_sock;
     std::string m_addr;
     uint16_t m_port;
+    bool m_host;
+    bool m_tls;
 
     std::thread m_thread;
     std::thread m_threadNet;

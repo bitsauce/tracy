@@ -18,6 +18,9 @@ struct Config
     int dynamicColors = 1;
     bool forceColors = false;
     int shortenName = (int)ShortenName::NoSpaceAndNormalize;
+    int connectionMode = 0;   // 0 = Connect (outbound TCP), 1 = Host (inbound WS)
+    int hostPort = 8086;
+    bool hostTls = false;
 };
 
 }

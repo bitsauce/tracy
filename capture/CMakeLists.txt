@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 option(NO_ISA_EXTENSIONS "Disable ISA extensions (don't pass -march=native or -mcpu=native to the compiler)" OFF)
 option(NO_STATISTICS "Disable calculation of statistics" ON)
 option(NO_PARALLEL_STL "Disable parallel STL" OFF)
+option(ENABLE_WEBSOCKETS "Link websocketpp when true to connect to WebSockets" ON)
 
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/version.cmake)
 

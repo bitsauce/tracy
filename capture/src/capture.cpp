@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sstream>
+#include <iomanip>
 
 #include "../../public/common/TracyProtocol.hpp"
 #include "../../public/common/TracyStackFrames.hpp"
@@ -56,6 +58,16 @@ void InitIsStdoutATerminal() {
 
 bool IsStdoutATerminal() { return s_isStdoutATerminal; }
 
+bool IsDir(const std::string& p) {
+#ifdef _WIN32
+    struct _stat info;
+    return (_stat(p.c_str(), &info) == 0) && (info.st_mode & _S_IFDIR);
+#else
+    struct stat info;
+    return (stat(p.c_str(), &info) == 0) && S_ISDIR(info.st_mode);
+#endif
+}
+
 #define ANSI_RESET "\033[0m"
 #define ANSI_BOLD "\033[1m"
 #define ANSI_BLACK "\033[30m"
@@ -92,7 +104,13 @@ void AnsiPrintf( const char* ansiEscape, const char* format, ... ) {
 
 [[noreturn]] void Usage()
 {
-    printf( "Usage: capture -o output.tracy [-a address] [-p port] [-f] [-s seconds] [-m memlimit]\n" );
+    printf( "Usage: capture -o output.tracy [-a address] [-p port] [-l] [-T] [-f] [-s seconds] [-m memlimit]\n" );
+    printf( "  -a address    Address of the instrumented application to connect to (default 127.0.0.1).\n" );
+    printf( "  -p port       Port. In connect mode (default): the app's TCP port. In listen mode: the WS port.\n" );
+    printf( "  -l            Listen mode — wait for an incoming WebSocket connection from a (typically\n" );
+    printf( "                browser-instrumented) application instead of connecting outbound. Ignores -a.\n" );
+    printf( "  -T            Use TLS for the WebSocket listener (wss://). Only meaningful with -l, and\n" );
+    printf( "                requires that capture was built with secure WebSockets enabled.\n" );
     exit( 1 );
 }
 
@@ -114,9 +132,11 @@ int main( int argc, char** argv )
     int port = 8086;
     int seconds = -1;
     int64_t memoryLimit = -1;
+    bool host = false;
+    bool useTls = false;
 
     int c;
-    while( ( c = getopt( argc, argv, "a:o:p:fs:m:" ) ) != -1 )
+    while( ( c = getopt( argc, argv, "a:o:p:fs:m:lT" ) ) != -1 )
     {
         switch( c )
         {
@@ -138,13 +158,57 @@ int main( int argc, char** argv )
         case 'm':
             memoryLimit = std::clamp( atoll( optarg ), 1ll, 999ll ) * tracy::GetPhysicalMemorySize() / 100;
             break;
+        case 'l':
+            host = true;
+            break;
+        case 'T':
+            useTls = true;
+            break;
         default:
             Usage();
             break;
         }
     }
 
-    if( !address || !output ) Usage();
+    if( !output ) Usage();
+    if( !host && !address ) Usage();
+#ifndef ENABLE_WEBSOCKETS
+    if( host )
+    {
+        printf( "Listen mode (-l) requires capture to be built with WebSocket support.\n" );
+        return 7;
+    }
+#endif
+#ifndef ENABLE_SECURE_WEBSOCKETS
+    if( useTls )
+    {
+        printf( "TLS (-T) requires capture to be built with secure WebSocket support (OpenSSL).\n" );
+        return 7;
+    }
+#endif
+    if( useTls && !host )
+    {
+        printf( "-T (TLS) is only meaningful together with -l (listen mode).\n" );
+        return 7;
+    }
+
+    // Output traces to a directory if no file extension was set
+    std::string timestampFilePath;
+    if( std::string( output ).find_first_of( '.' ) == std::string::npos )
+    {
+        if (!IsDir( output ))
+        {
+            printf( "Output path %s must be an existing directory. Either create it to output traces to it or add an extension to -o file name if you want to output to a file instead\n", output );
+            return 6;
+        }
+        auto now = std::chrono::system_clock::now();
+        std::time_t now_c = std::chrono::system_clock::to_time_t(now);
+        std::tm* ptm = std::localtime(&now_c);
+        std::stringstream ss;
+        ss << output << "/" << std::put_time(ptm, "%Y-%m-%d_%H-%M-%S") << ".tracy";
+        timestampFilePath = ss.str();
+        output = timestampFilePath.c_str();
+    }
 
     struct stat st;
     if( stat( output, &st ) == 0 && !overwrite )
@@ -162,9 +226,16 @@ int main( int argc, char** argv )
     fclose( test );
     unlink( output );
 
-    printf( "Connecting to %s:%i...", address, port );
+    if( host )
+    {
+        printf( "Listening on %s://0.0.0.0:%i for incoming connection...\n", useTls ? "wss" : "ws", port );
+    }
+    else
+    {
+        printf( "Connecting to %s:%i...\n", address, port );
+    }
     fflush( stdout );
-    tracy::Worker worker( address, port, memoryLimit );
+    tracy::Worker worker( host ? "" : address, port, memoryLimit, host, useTls );
     while( !worker.HasData() )
     {
         const auto handshake = worker.GetHandshakeStatus();
