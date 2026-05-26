@@ -5,6 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// The emscripten WebSocket client backend is only meaningful for the instrumented
+// app (TracyClient). The profiler GUI built for the web (TracyServer on emscripten)
+// doesn't need it — and its link flags don't include -sUSE_WEBSOCKET, so leaving the
+// code in causes link errors. TRACY_ENABLE is set for TracyClient but not for
+// TracyServer, so it's the right discriminator.
+#if defined __EMSCRIPTEN__ && defined TRACY_ENABLE
+#  define TRACY_EMSCRIPTEN_WS_CLIENT
+#endif
+
 struct addrinfo;
 struct sockaddr;
 
@@ -15,7 +24,7 @@ namespace tracy
 void InitWinSock();
 #endif
 
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
 struct EmWsImpl;
 #endif
 
@@ -72,7 +81,7 @@ private:
     struct addrinfo *m_ptr;
     int m_connSock;
 
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     EmWsImpl* m_emWs;
 #endif
 

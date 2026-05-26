@@ -13,7 +13,7 @@
 #include "TracySocket.hpp"
 #include "TracySystem.hpp"
 
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
 #  include <condition_variable>
 #  include <deque>
 #  include <mutex>
@@ -93,7 +93,7 @@ void InitWinSock()
 
 enum { BufSize = 128 * 1024 };
 
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
 // pImpl state for the emscripten WebSocket-backed Socket. Lives in main browser
 // thread land (where ws callbacks fire) and is read/written by the Tracy network
 // pthread (which calls Connect/Send/Recv). All cross-thread state goes through
@@ -121,7 +121,7 @@ EM_BOOL EmWsImpl::OnOpen( int, const EmscriptenWebSocketOpenEvent*, void* user )
 {
     auto self = static_cast<EmWsImpl*>( user );
     {
-        std::lock_guard lk( self->mtx );
+        std::lock_guard<std::mutex> lk( self->mtx );
         self->state.store( State::Open, std::memory_order_release );
     }
     self->cv.notify_all();
@@ -132,7 +132,7 @@ EM_BOOL EmWsImpl::OnClose( int, const EmscriptenWebSocketCloseEvent*, void* user
 {
     auto self = static_cast<EmWsImpl*>( user );
     {
-        std::lock_guard lk( self->mtx );
+        std::lock_guard<std::mutex> lk( self->mtx );
         const auto prev = self->state.load( std::memory_order_acquire );
         // If we never reached Open, treat as a connect-time failure so Connect()
         // returns false rather than reporting a healthy-then-closed link.
@@ -147,7 +147,7 @@ EM_BOOL EmWsImpl::OnError( int, const EmscriptenWebSocketErrorEvent*, void* user
 {
     auto self = static_cast<EmWsImpl*>( user );
     {
-        std::lock_guard lk( self->mtx );
+        std::lock_guard<std::mutex> lk( self->mtx );
         self->state.store( State::Failed, std::memory_order_release );
     }
     self->cv.notify_all();
@@ -160,7 +160,7 @@ EM_BOOL EmWsImpl::OnMsg( int, const EmscriptenWebSocketMessageEvent* e, void* us
     if( e->isText ) return EM_TRUE;
     auto self = static_cast<EmWsImpl*>( user );
     {
-        std::lock_guard lk( self->mtx );
+        std::lock_guard<std::mutex> lk( self->mtx );
         self->queue.emplace_back( e->data, e->data + e->numBytes );
     }
     self->cv.notify_all();
@@ -174,7 +174,7 @@ Socket::Socket()
     , m_sock( -1 )
     , m_bufLeft( 0 )
     , m_ptr( nullptr )
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     , m_emWs( new EmWsImpl )
 #endif
     , m_alive( false )
@@ -190,7 +190,7 @@ Socket::Socket( int sock )
     , m_sock( sock )
     , m_bufLeft( 0 )
     , m_ptr( nullptr )
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     , m_emWs( nullptr )   // accept-side; never used under emscripten (no listen)
 #endif
     , m_alive( true )
@@ -200,7 +200,7 @@ Socket::Socket( int sock )
 Socket::~Socket()
 {
     tracy_free( m_buf );
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     if( m_emWs )
     {
         if( m_emWs->ws )
@@ -231,7 +231,7 @@ bool Socket::Connect( const char* addr, uint16_t port, bool tls )
 {
     assert( !IsValid() );
 
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     // Browsers don't have BSD sockets — go straight to the WebSocket API.
     // The handshake is async, so we wait on the impl's condvar for the
     // open/error/close callback to land on the main browser thread.
@@ -263,7 +263,7 @@ bool Socket::Connect( const char* addr, uint16_t port, bool tls )
     emscripten_websocket_set_onmessage_callback_on_thread( m_emWs->ws, m_emWs, EmWsImpl::OnMsg,   cbThread );
 
     {
-        std::unique_lock lk( m_emWs->mtx );
+        std::unique_lock<std::mutex> lk( m_emWs->mtx );
         m_emWs->cv.wait( lk, [&]{
             return m_emWs->state.load( std::memory_order_acquire ) != EmWsImpl::State::Connecting;
         } );
@@ -393,7 +393,7 @@ bool Socket::Connect( const char* addr, uint16_t port, bool tls )
 bool Socket::ConnectBlocking( const char* addr, uint16_t port, bool tls )
 {
     assert( !IsValid() );
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     // Our emscripten Connect already blocks until the handshake resolves, so the
     // blocking variant is just a forward — there's no two-stage non-blocking
     // path for browser WebSockets to begin with.
@@ -441,7 +441,7 @@ bool Socket::ConnectBlocking( const char* addr, uint16_t port, bool tls )
 
 void Socket::Close()
 {
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     if( m_emWs && m_emWs->ws )
     {
         emscripten_websocket_close( m_emWs->ws, 1000, "shutdown" );
@@ -463,7 +463,7 @@ void Socket::Close()
 
 int Socket::Send( const void* _buf, int len )
 {
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     if( !m_emWs || !m_emWs->ws || !m_alive ) return -1;
     if( emscripten_websocket_send_binary( m_emWs->ws, const_cast<void*>(_buf), len ) < 0 )
     {
@@ -533,10 +533,10 @@ int Socket::RecvBuffered( void* buf, int len, int timeout )
 
 int Socket::Recv( void* _buf, int len, int timeout )
 {
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     if( !m_emWs ) return -1;
     auto buf = (char*)_buf;
-    std::unique_lock lk( m_emWs->mtx );
+    std::unique_lock<std::mutex> lk( m_emWs->mtx );
     if( m_emWs->queue.empty() )
     {
         // No frame buffered. Wait up to `timeout` ms for one to arrive or for the
@@ -598,7 +598,7 @@ int Socket::Recv( void* _buf, int len, int timeout )
 
 int Socket::ReadUpTo( void* _buf, int len )
 {
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     // No long-blocking read for the WS backend — drain whatever's queued and
     // wait briefly for the next frame, mirroring the BSD recv() semantics
     // closely enough for ReadImpl's callers.
@@ -682,9 +682,9 @@ bool Socket::ReadRaw( void* _buf, int len, int timeout )
 bool Socket::HasData()
 {
     if( m_bufLeft > 0 ) return true;
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     if( !m_emWs ) return false;
-    std::lock_guard lk( m_emWs->mtx );
+    std::lock_guard<std::mutex> lk( m_emWs->mtx );
     return !m_emWs->queue.empty();
 #else
     const auto sock = m_sock.load( std::memory_order_relaxed );
@@ -699,7 +699,7 @@ bool Socket::HasData()
 
 bool Socket::IsValid() const
 {
-#ifdef __EMSCRIPTEN__
+#ifdef TRACY_EMSCRIPTEN_WS_CLIENT
     // Consult state, not just m_alive — OnClose/OnError can fire on the main
     // thread between worker Recv calls, and m_alive isn't cleared until the
     // next Recv observes the failure.

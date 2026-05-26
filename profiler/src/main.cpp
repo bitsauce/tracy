@@ -226,6 +226,12 @@ static void LoadConfig()
     if( ini_sget( ini, "core", "connectionMode", "%d", &v ) && ( v == 0 || v == 1 ) ) s_config.connectionMode = v;
     if( ini_sget( ini, "core", "hostPort", "%d", &v ) && v > 0 && v < 65536 ) s_config.hostPort = v;
     if( ini_sget( ini, "core", "hostTls", "%d", &v ) ) s_config.hostTls = v;
+#ifndef ENABLE_WEBSOCKETS
+    // No WebSocket support compiled in (e.g. emscripten — browsers can't host a
+    // listening socket). Force Connect mode so a stale config from a WS-capable
+    // build doesn't trap the user in a hidden Host mode with no way out.
+    s_config.connectionMode = 0;
+#endif
 #ifndef ENABLE_SECURE_WEBSOCKETS
     // Drop a stale "on" from a TLS-capable build so the disabled UI matches what
     // would actually happen if the user clicked Host.
@@ -928,9 +934,11 @@ static void DrawContents()
             ImGui::PopFont();
         }
         ImGui::Separator();
+#ifdef ENABLE_WEBSOCKETS
         ImGui::RadioButton( "Connect to app", &s_config.connectionMode, 0 );
         ImGui::SameLine();
         ImGui::RadioButton( "Host WebSocket", &s_config.connectionMode, 1 );
+#endif
         bool connectClicked = false;
         if( s_config.connectionMode == 0 )
         {
@@ -982,6 +990,7 @@ static void DrawContents()
                 }
             }
         }
+#ifdef ENABLE_WEBSOCKETS
         else
         {
             // Host mode: the profiler listens for an incoming WebSocket from a
@@ -1012,6 +1021,7 @@ static void DrawContents()
                 view = std::make_unique<tracy::View>( RunOnMainThread, "", (uint16_t)s_config.hostPort, s_fixedWidth, s_smallFont, s_bigFont, SetWindowTitleCallback, SetupScaleCallback, AttentionCallback, s_config, s_achievements, true, s_config.hostTls );
             }
         }
+#endif
         if( s_config.memoryLimit )
         {
             ImGui::SameLine();
